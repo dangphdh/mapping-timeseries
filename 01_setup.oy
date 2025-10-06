@@ -1,0 +1,283 @@
+# Databricks notebook source
+# MAGIC %md
+# MAGIC # Transaction-Revenue Mapping với DTW và Correlation
+# MAGIC ## Setup và Utility Functions
+# MAGIC 
+# MAGIC **Author:** dangphdh  
+# MAGIC **Date:** 2025-10-06  
+# MAGIC **Environment:** Databricks + PySpark
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 1. Import Libraries
+
+# COMMAND ----------
+
+from pyspark.sql import SparkSession, Window
+from pyspark.sql.functions import (
+    col, lag, lead, row_number, rank, dense_rank,
+    avg, sum as _sum, count, stddev, min as _min, max as _max,
+    udf, pandas_udf, PandasUDFType,
+    struct, collect_list, array, explode, lit,
+    monotonically_increasing_id, when
+)
+from pyspark.sql.types import (
+    StructType, StructField, StringType, DoubleType, 
+    IntegerType, ArrayType, FloatType, LongType
+)
+
+import pandas as pd
+import numpy as np
+from scipy.stats import pearsonr
+from scipy.spatial.distance import euclidean
+from typing import Iterator, List, Tuple
+import json
+
+# Visualization
+import matplotlib.pyplot as plt
+import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 2. Configuration
+
+# COMMAND ----------
+
+# Spark Configuration
+spark.conf.set("spark.sql.adaptive.enabled", "true")
+spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+spark.conf.set("spark.sql.execution.arrow.pyspark.enabled", "true")
+spark.conf.set("spark.sql.execution.arrow.maxRecordsPerBatch", "10000")
+
+# Display Settings
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', 100)
+sns.set_style("whitegrid")
+
+print("✅ Spark Configuration Done")
+print(f"   Spark Version: {spark.version}")
+print(f"   Python Version: {pd.__version__}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 3. Create Sample Data
+
+# COMMAND ----------
+
+def create_sample_data(num_customers=100, num_months=12, seed=42):
+    """
+    Tạo dữ liệu mẫu cho testing
+    
+    Args:
+        num_customers: Số lượng khách hàng
+        num_months: Số tháng
+        seed: Random seed
+    
+    Returns:
+        (tbl1_spark, tbl2_spark): Tuple of Spark DataFrames
+    """
+    np.random.seed(seed)
+    
+    # Generate data
+    data_txn = []
+    data_rev = []
+    
+    for cus_id in range(1, num_customers + 1):
+        cus_code = f"CUS_{cus_id:04d}"
+        
+        # Random pattern cho mỗi khách hàng
+        pattern_type = np.random.choice(['simple', 'complex', 'irregular'])
+        
+        for month in range(1, num_months + 1):
+            month_str = f"2024-{month:02d}"
+            
+            if pattern_type == 'simple':
+                # Revenue trễ 1 tháng, tỷ lệ cố định
+                txn_amount = np.random.uniform(50, 300)
+                revenue = txn_amount * 0.1 if month > 1 else 0
+                
+            elif pattern_type == 'complex':
+                # Revenue từ nhiều tháng, có trọng số
+                txn_amount = np.random.uniform(50, 300)
+                revenue = 0
+                if month > 1:
+                    revenue += txn_amount * 0.05  # tháng hiện tại
+                if month > 2:
+                    revenue += txn_amount * 0.03  # tháng trước
+                if month > 3:
+                    revenue += txn_amount * 0.02  # 2 tháng trước
+                    
+            else:  # irregular
+                # Pattern không đều
+                txn_amount = np.random.uniform(50, 300) * (1 + 0.3 * np.sin(month))
+                lag = np.random.randint(0, 3)
+                revenue = txn_amount * np.random.uniform(0.05, 0.15) if month > lag else 0
+            
+            # Add noise
+            txn_amount += np.random.normal(0, 10)
+            revenue += np.random.normal(0, 2)
+            
+            data_txn.append({
+                'cus_code': cus_code,
+                'month': month_str,
+                'txn_amount': max(0, txn_amount),
+                'pattern_type': pattern_type
+            })
+            
+            data_rev.append({
+                'cus_code': cus_code,
+                'month': month_str,
+                'revenue': max(0, revenue)
+            })
+    
+    # Convert to Spark DataFrames
+    tbl1_spark = spark.createDataFrame(pd.DataFrame(data_txn))
+    tbl2_spark = spark.createDataFrame(pd.DataFrame(data_rev))
+    
+    print(f"✅ Sample Data Created")
+    print(f"   Customers: {num_customers}")
+    print(f"   Months: {num_months}")
+    print(f"   Total Transactions: {tbl1_spark.count():,}")
+    print(f"   Total Revenue Records: {tbl2_spark.count():,}")
+    
+    return tbl1_spark, tbl2_spark
+
+# Create sample data
+tbl1, tbl2 = create_sample_data(num_customers=100, num_months=12)
+
+# Display
+display(tbl1.limit(10))
+display(tbl2.limit(10))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 4. Utility Functions
+
+# COMMAND ----------
+
+def normalize_series(arr: np.ndarray) -> np.ndarray:
+    """Chuẩn hóa time series"""
+    mean = arr.mean()
+    std = arr.std()
+    if std == 0:
+        return arr - mean
+    return (arr - mean) / std
+
+def compute_distance_matrix(txn: np.ndarray, rev: np.ndarray, 
+                           normalize: bool = True) -> np.ndarray:
+    """Tính distance matrix giữa 2 time series"""
+    if normalize:
+        txn = normalize_series(txn)
+        rev = normalize_series(rev)
+    
+    n, m = len(txn), len(rev)
+    distance_matrix = np.zeros((n, m))
+    
+    for i in range(n):
+        for j in range(m):
+            distance_matrix[i, j] = abs(txn[i] - rev[j])
+    
+    return distance_matrix
+
+print("✅ Utility Functions Loaded")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### 5. Data Quality Checks
+
+# COMMAND ----------
+
+def check_data_quality(tbl1, tbl2):
+    """
+    Kiểm tra chất lượng data
+    """
+    print("="*60)
+    print("DATA QUALITY REPORT")
+    print("="*60)
+    
+    # 1. Basic stats
+    print("\n1. BASIC STATISTICS")
+    print("-" * 60)
+    
+    txn_stats = tbl1.select(
+        count("*").alias("total_rows"),
+        countDistinct("cus_code").alias("unique_customers"),
+        countDistinct("month").alias("unique_months"),
+        _min("txn_amount").alias("min_txn"),
+        _max("txn_amount").alias("max_txn"),
+        avg("txn_amount").alias("avg_txn"),
+        stddev("txn_amount").alias("std_txn")
+    ).toPandas()
+    
+    print("\nTransaction Table:")
+    print(txn_stats.to_string(index=False))
+    
+    rev_stats = tbl2.select(
+        count("*").alias("total_rows"),
+        countDistinct("cus_code").alias("unique_customers"),
+        countDistinct("month").alias("unique_months"),
+        _min("revenue").alias("min_rev"),
+        _max("revenue").alias("max_rev"),
+        avg("revenue").alias("avg_rev"),
+        stddev("revenue").alias("std_rev")
+    ).toPandas()
+    
+    print("\nRevenue Table:")
+    print(rev_stats.to_string(index=False))
+    
+    # 2. Missing data
+    print("\n2. MISSING DATA CHECK")
+    print("-" * 60)
+    
+    missing_txn = tbl1.filter(col("txn_amount").isNull()).count()
+    missing_rev = tbl2.filter(col("revenue").isNull()).count()
+    
+    print(f"Missing transactions: {missing_txn}")
+    print(f"Missing revenue: {missing_rev}")
+    
+    # 3. Data alignment
+    print("\n3. DATA ALIGNMENT")
+    print("-" * 60)
+    
+    alignment = tbl1.alias("t1").join(
+        tbl2.alias("t2"),
+        (col("t1.cus_code") == col("t2.cus_code")) & 
+        (col("t1.month") == col("t2.month")),
+        "full_outer"
+    ).agg(
+        count(when(col("t1.cus_code").isNotNull() & col("t2.cus_code").isNotNull(), 1)).alias("matched"),
+        count(when(col("t1.cus_code").isNotNull() & col("t2.cus_code").isNull(), 1)).alias("txn_only"),
+        count(when(col("t1.cus_code").isNull() & col("t2.cus_code").isNotNull(), 1)).alias("rev_only")
+    ).toPandas()
+    
+    print(alignment.to_string(index=False))
+    
+    # 4. Outliers
+    print("\n4. OUTLIER DETECTION")
+    print("-" * 60)
+    
+    # Using IQR method
+    txn_quantiles = tbl1.approxQuantile("txn_amount", [0.25, 0.75], 0.01)
+    iqr = txn_quantiles[1] - txn_quantiles[0]
+    lower_bound = txn_quantiles[0] - 1.5 * iqr
+    upper_bound = txn_quantiles[1] + 1.5 * iqr
+    
+    outliers = tbl1.filter(
+        (col("txn_amount") < lower_bound) | (col("txn_amount") > upper_bound)
+    ).count()
+    
+    print(f"Transaction outliers: {outliers} ({outliers/tbl1.count()*100:.2f}%)")
+    print(f"  Lower bound: {lower_bound:.2f}")
+    print(f"  Upper bound: {upper_bound:.2f}")
+    
+    print("\n" + "="*60)
+
+check_data_quality(tbl1, tbl2)
