@@ -23,10 +23,33 @@ The Generic Mapping Engine provides a reusable, Spark-optimized solution for map
 ## 📦 Files
 
 - `mapping_engine.py` - Main mapping engine implementation
+- `databricks_intro_tutorial.py` - **NEW!** Comprehensive Databricks tutorial for beginners
+- `example_usage.py` - Quick start examples
 - `test_mapping_engine.py` - Comprehensive test suite and examples
 - `README.md` - This documentation
+- `QUICK_REFERENCE.md` - Quick reference guide
+- `ARCHITECTURE.md` - Architecture documentation
 
 ## 🎯 Quick Start
+
+### 🆕 New to the Mapping Engine? Start Here!
+
+**For a complete step-by-step tutorial**, check out the new Databricks introduction notebook:
+
+```python
+%run ./databricks_intro_tutorial
+```
+
+This interactive tutorial covers:
+- ✅ Complete setup and data preparation
+- ✅ Step-by-step mapping examples  
+- ✅ All three methods (correlation, DTW, auto)
+- ✅ Result analysis and visualization
+- ✅ Performance optimization tips
+- ✅ Troubleshooting guide
+- ✅ Real-world use cases
+
+**Estimated time:** 15-20 minutes
 
 ### Basic Usage
 
