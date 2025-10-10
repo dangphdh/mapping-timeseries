@@ -303,6 +303,7 @@ final_result = result_corr  # or result_dtw
 
 ## 🔗 Links
 
+- **Tutorial**: `databricks_intro_tutorial.py` - **Start here!** Comprehensive Databricks tutorial
 - Main Documentation: `README.md`
 - Architecture: `ARCHITECTURE.md`
 - Tests: `test_mapping_engine.py`
@@ -318,4 +319,4 @@ final_result = result_corr  # or result_dtw
 
 ---
 
-**Need Help?** See `README.md` for detailed documentation or `example_usage.py` for step-by-step tutorial.
+**Need Help?** See `databricks_intro_tutorial.py` for a complete tutorial, `README.md` for detailed documentation, or `example_usage.py` for quick examples.
